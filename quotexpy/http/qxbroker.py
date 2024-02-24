@@ -1,6 +1,8 @@
 import re
 import json
 import shutil
+import sys
+import time
 import requests
 from pathlib import Path
 from bs4 import BeautifulSoup
@@ -8,6 +10,10 @@ from typing import Tuple, Any
 from quotexpy.exceptions import QuotexAuthError
 from quotexpy.utils.playwright_install import install
 from playwright.async_api import Playwright, async_playwright
+
+import tagui
+import rpa as r
+import PyChromeDevTools
 
 
 class Browser(object):
@@ -19,45 +25,64 @@ class Browser(object):
 
     def __init__(self, api):
         self.api = api
+    
+    def __location_tagui(self) -> None:
+        if sys.platform == 'win32':
+            location_tagui = Path.cwd().joinpath('.tagui_win')
+        else:
+            location_tagui = Path.cwd().joinpath('.tagui_unix')
 
+        r.tagui_location(location=str(location_tagui))
+        if not location_tagui.exists():
+            location_tagui.mkdir()
+            tagui.setup()
+            for file_name in ['tagui.cmd', 'tagui']:
+                tagui_cfg = location_tagui.joinpath('tagui', 'src', file_name)
+                with tagui_cfg.open() as f:
+                    newText=f.read().replace(
+                        '--remote-debugging-port=9222 about:blank',
+                        '--remote-debugging-port=9222 --remote-allow-origins=* --incognito about:blank',
+                    )
+
+                with tagui_cfg.open("w") as f:
+                    f.write(newText)
+    
     async def run(self, playwright: Playwright) -> Tuple[Any, str]:
-        browser = await playwright.firefox.launch(headless=True)
-        context = await browser.new_context()
-        page = await context.new_page()
+        self.__location_tagui()
+        r.init()
+        chrome_devt = PyChromeDevTools.ChromeInterface()
+        r.url('https://qxbroker.com/pt/sign-in')
+        r.wait()
 
-        await page.goto(f"{self.https_base_url}/pt/sign-in")
-        if page.url != f"{self.https_base_url}/pt/trade":
-            await page.get_by_role("textbox", name="E-mail").click()
-            await page.get_by_role("textbox", name="E-mail").fill(self.email)
-            await page.get_by_role("textbox", name="Senha").click()
-            await page.get_by_role("textbox", name="Senha").fill(self.password)
-            await page.get_by_role("button", name="Entrar").click()
-            async with page.expect_navigation():
-                await page.wait_for_timeout(5000)
-                soup = BeautifulSoup(await page.content(), "html.parser")
-                if "Insira o código PIN que acabamos de enviar para o seu e-mail" in soup.get_text():
-                    code = input("Enter the PIN code we just sent to your email: ")
-                    """await page.evaluate(
-                        f'() => {{ document.querySelector("input[name=\\"code\\"]").value = {int(code)}; }}')"""
-                    try:
-                        await page.get_by_placeholder("Digite o código de 6 dígitos...").click()
-                        await page.get_by_placeholder("Digite o código de 6 dígitos...").fill(code)
-                        await page.get_by_role("button", name="Entrar").click()
-                    except:
-                        await page.get_by_placeholder("Digite o código de 6 dígitos...").click()
-                        await page.get_by_placeholder("Digite o código de 6 dígitos...").fill(code)
-                        await page.get_by_role("button", name="Entrar").click()
-        await page.wait_for_timeout(5000)
-        cookies = await context.cookies()
+        if r.dom('return document.URL') == 'https://qxbroker.com/pt/trade':
+            source = r.dom('return document.documentElement.innerHTML')
+            user_agent = r.dom('return navigator.userAgent')
+        else:
+            r.click('//html/body/bdi/div[1]/div/div[2]/div[3]/form/div[1]/input')
+            r.type('//html/body/bdi/div[1]/div/div[2]/div[3]/form/div[1]/input', 'batista.santos@ymail.com')
+
+            r.click('//html/body/bdi/div[1]/div/div[2]/div[3]/form/div[2]/input')
+            r.type('//html/body/bdi/div[1]/div/div[2]/div[3]/form/div[2]/input', ':kNjsU^~9}!udq?')
+
+            r.click('//html/body/bdi/div[1]/div/div[2]/div[3]/form/button')
+
+            if r.click('//html/body/div[2]/main/form/div[1]/label'):
+                r.type('//html/body/div[2]/main/form/div[1]/label', input('Digite o código de 6 dígitos:'))
+                r.click('//html/body/div[2]/main/form/div[2]/button')
+                r.wait()
+            
+            source = r.dom('return document.documentElement.innerHTML')
+            user_agent = r.dom('return navigator.userAgent')
+
+            time.sleep(1)
+        
+        cookies, _ = chrome_devt.Network.getCookies()
+        cookies = cookies["result"]["cookies"]
+        r.close()
         self.api.cookies = cookies
-        source = await page.content()
         soup = BeautifulSoup(source, "html.parser")
-        user_agent = await page.evaluate("() => navigator.userAgent;")
         self.api.user_agent = user_agent
-        try:
-            script = soup.find_all("script", {"type": "text/javascript"})[1].get_text()
-        except Exception as exc:
-            raise QuotexAuthError("incorrect username or password") from exc
+        script = soup.find_all("script", {"type": "text/javascript"})[1].get_text()
         match = re.sub("window.settings = ", "", script.strip().replace(";", ""))
 
         ssid = json.loads(match).get("token")
@@ -65,9 +90,6 @@ class Browser(object):
         output_file.parent.mkdir(exist_ok=True, parents=True)
         cookiejar = requests.utils.cookiejar_from_dict({c["name"]: c["value"] for c in cookies})
         cookie_string = "; ".join([f"{c.name}={c.value}" for c in cookiejar])
-        output_file.write_text(json.dumps({"cookies": cookie_string, "ssid": ssid, "user_agent": user_agent}, indent=4))
-        await context.close()
-        await browser.close()
 
         return ssid, cookie_string
 
